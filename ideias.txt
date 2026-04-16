@@ -1,0 +1,32 @@
+
+Um modelo unificado de armazenamento
+
+Ideia:
+Dados estruturados (SQL)
+embeddings (IA)
+busca semântica
+
+Exemplo de inspiração:
+Weaviate
+Pinecone
+_____________________________________________________________________________________________
+
+Arquitetura de dados que suporta IA urbana
+
+Ideia:
+Dados de:
+- população
+- mobilidade
+- economia
+modelos preditivos integrados
+
+banco já preparado para:
+previsão
+recomendação pública
+_____________________________________________________________________________________________
+
+
+Trabalho com dados topográficos 
+
+Ideia:
+Sistema 3d de visualização de dados topográficos e cálculos de engenharia
