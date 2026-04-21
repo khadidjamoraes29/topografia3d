@@ -2,8 +2,10 @@ import streamlit as st
 import numpy as np
 import pandas as pd
 from scipy.interpolate import griddata
+from scipy.ndimage import gaussian_filter
 import plotly.graph_objects as go
 from pyproj import Transformer
+import richdem as rd
 
 st.set_page_config(layout="wide")
 
@@ -21,11 +23,9 @@ if uploaded_file:
     lat = data.iloc[:, 1].values
     z = data.iloc[:, 2].values
 
-    # Converter para UTM (Recife → zona 25S)
     transformer = Transformer.from_crs("EPSG:4326", "EPSG:32725", always_xy=True)
     x, y = transformer.transform(lon, lat)
 
-    # Normalizar (evita bugs visuais)
     x = x - np.min(x)
     y = y - np.min(y)
 
@@ -43,7 +43,6 @@ else:
 st.sidebar.header("⚙️ Configurações")
 
 resolucao = st.sidebar.slider("Resolução", 50, 200, 120)
-tipo_interp = st.sidebar.selectbox("Interpolação", ["cubic", "linear", "nearest"])
 
 modo = st.sidebar.selectbox(
     "Modo de análise",
@@ -60,40 +59,65 @@ nivel_plano = st.sidebar.slider(
     float(np.min(z)), float(np.max(z)), float(np.mean(z))
 )
 
+# Drenagem
+st.sidebar.header("💧 Drenagem")
+suavizar = st.sidebar.checkbox("Suavizar terreno", True)
+sigma = st.sidebar.slider("Intensidade suavização", 0.5, 3.0, 1.0)
+threshold_rios = st.sidebar.slider("Threshold rios", 10, 1000, 200)
+
 # -------------------------
-# Interpolação
+# Interpolação ROBUSTA
 # -------------------------
 grid_x, grid_y = np.meshgrid(
     np.linspace(min(x), max(x), resolucao),
     np.linspace(min(y), max(y), resolucao)
 )
 
-grid_z = griddata((x, y), z, (grid_x, grid_y), method=tipo_interp)
-grid_z = np.nan_to_num(grid_z, nan=np.nanmean(grid_z))
+# linear + fallback nearest (evita distorção)
+grid_z = griddata((x, y), z, (grid_x, grid_y), method='linear')
+grid_z_nearest = griddata((x, y), z, (grid_x, grid_y), method='nearest')
+grid_z[np.isnan(grid_z)] = grid_z_nearest[np.isnan(grid_z)]
 
 # -------------------------
-# Engenharia
+# SEPARAÇÃO CORRETA DO TERRENO
 # -------------------------
+grid_z_original = grid_z.copy()
 
-# Espaçamento real
-dx = (np.max(x) - np.min(x)) / resolucao
-dy = (np.max(y) - np.min(y)) / resolucao
+if suavizar:
+    grid_z_suave = gaussian_filter(grid_z, sigma=sigma)
+else:
+    grid_z_suave = grid_z.copy()
 
-# Inclinação correta
-dz_dx, dz_dy = np.gradient(grid_z, dx, dy)
-slope = np.sqrt(dz_dx**2 + dz_dy**2) * 100
-areas_criticas = slope > limite_rampa
+# -------------------------
+# ENGENHARIA
+# -------------------------
+dx = (np.max(x) - np.min(x)) / (resolucao - 1)
+dy = (np.max(y) - np.min(y)) / (resolucao - 1)
 
-# Drenagem otimizada
-flow = np.zeros_like(grid_z)
-flow += (grid_z > np.roll(grid_z, 1, axis=0))
-flow += (grid_z > np.roll(grid_z, -1, axis=0))
-flow += (grid_z > np.roll(grid_z, 1, axis=1))
-flow += (grid_z > np.roll(grid_z, -1, axis=1))
+# Inclinação (USA ORIGINAL)
+dz_dx, dz_dy = np.gradient(grid_z_original, dx, dy)
+slope = np.sqrt(dz_dx**2 + dz_dy**2)
+slope_percent = slope * 100
+areas_criticas = slope_percent > limite_rampa
 
-# Corte/Aterro
-corte = np.where(grid_z > nivel_plano, grid_z - nivel_plano, 0)
-aterro = np.where(grid_z < nivel_plano, nivel_plano - grid_z, 0)
+# -------------------------
+# DRENAGEM (USA SUAVIZADO)
+# -------------------------
+dem = rd.rdarray(grid_z_suave, no_data=-9999)
+
+rd.FillDepressions(dem, in_place=True)
+rd.ResolveFlats(dem, in_place=True)
+
+flow_acc = rd.FlowAccumulation(dem, method='D8')
+flow_acc = np.array(flow_acc)
+
+rios = flow_acc > threshold_rios
+
+# -------------------------
+# Corte/Aterro (USA ORIGINAL)
+# -------------------------
+corte = np.where(grid_z_original > nivel_plano, grid_z_original - nivel_plano, 0)
+aterro = np.where(grid_z_original < nivel_plano, nivel_plano - grid_z_original, 0)
 
 volume_corte = np.sum(corte)
 volume_aterro = np.sum(aterro)
@@ -103,12 +127,9 @@ volume_aterro = np.sum(aterro)
 # -------------------------
 fig = go.Figure()
 
-# Pontos originais (opcional)
 if mostrar_pontos:
     fig.add_trace(go.Scatter3d(
-        x=x,
-        y=y,
-        z=z,
+        x=x, y=y, z=z,
         mode='markers',
         marker=dict(size=2, color='white')
     ))
@@ -116,12 +137,12 @@ if mostrar_pontos:
 # 📐 INCLINAÇÃO
 if modo == "Inclinação":
 
-    mapa = np.where(slope <= limite_rampa, 0, 1)
+    mapa = np.where(slope_percent <= limite_rampa, 0, 1)
 
     fig.add_trace(go.Surface(
         x=grid_x,
         y=grid_y,
-        z=grid_z,
+        z=grid_z_original,
         surfacecolor=mapa,
         colorscale=[[0, "green"], [1, "red"]],
         showscale=False
@@ -133,23 +154,32 @@ elif modo == "Drenagem":
     fig.add_trace(go.Surface(
         x=grid_x,
         y=grid_y,
-        z=grid_z,
-        surfacecolor=flow,
+        z=grid_z_original,
+        surfacecolor=np.log1p(flow_acc),
         colorscale="Blues",
         showscale=True
+    ))
+
+    fig.add_trace(go.Surface(
+        x=grid_x,
+        y=grid_y,
+        z=grid_z_original + 0.1,
+        surfacecolor=rios.astype(int),
+        colorscale=[[0, "rgba(0,0,0,0)"], [1, "red"]],
+        showscale=False
     ))
 
 # 🏗️ TERRAPLANAGEM
 elif modo == "Terraplanagem":
 
-    mapa = np.zeros_like(grid_z)
-    mapa[grid_z > nivel_plano] = 1
-    mapa[grid_z < nivel_plano] = -1
+    mapa = np.zeros_like(grid_z_original)
+    mapa[grid_z_original > nivel_plano] = 1
+    mapa[grid_z_original < nivel_plano] = -1
 
     fig.add_trace(go.Surface(
         x=grid_x,
         y=grid_y,
-        z=grid_z,
+        z=grid_z_original,
         surfacecolor=mapa,
         colorscale=[
             [0.0, "blue"],
@@ -161,17 +191,16 @@ elif modo == "Terraplanagem":
         showscale=False
     ))
 
-# 🌍 VISUAL NORMAL
+# 🌍 VISUAL
 else:
     fig.add_trace(go.Surface(
         x=grid_x,
         y=grid_y,
-        z=grid_z,
+        z=grid_z_original,
         colorscale="Turbo",
         showscale=True
     ))
 
-# Layout
 fig.update_layout(
     scene=dict(
         xaxis_visible=False,
@@ -199,6 +228,8 @@ col3.metric(
     "Áreas Críticas (%)",
     f"{(np.sum(areas_criticas)/areas_criticas.size)*100:.1f}%"
 )
+
+st.metric("Células de drenagem (rios)", int(np.sum(rios)))
 
 # -------------------------
 # Exportar

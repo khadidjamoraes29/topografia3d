@@ -2,7 +2,7 @@ import rasterio
 import numpy as np
 import pandas as pd
 
-arquivo = "output_SRTMGL1.tif"
+arquivo = "recife.tif"
 
 with rasterio.open(arquivo) as src:
     banda = src.read(1)
@@ -28,6 +28,6 @@ df = pd.DataFrame({
     "Z": zs[mask]
 })
 
-df.to_csv("topografia.csv", index=False)
+df.to_csv("topografia2.csv", index=False)
 
 print("CSV gerado com sucesso!")
